@@ -49,9 +49,27 @@ func generateForecast(startingCash float64, entries []models.CashEntry) models.F
 		outflow float64
 	}, 13)
 
-	// Group entries by week
+	// Group entries by week (only future-dated entries: entry.date >= today)
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	currentWeekStart := getWeekStart(now)
+
 	for _, entry := range entries {
-		weekIndex := getWeekIndex(entry.Date)
+		entryDate, err := time.ParseInLocation("2006-01-02", entry.Date, now.Location())
+		if err != nil {
+			// skip invalid dates
+			continue
+		}
+
+		// only include entries dated today or in the future
+		if entryDate.Before(today) {
+			continue
+		}
+
+		entryWeekStart := getWeekStart(entryDate)
+		daysDiff := entryWeekStart.Sub(currentWeekStart).Hours() / 24
+		weekIndex := int(daysDiff / 7)
+
 		if weekIndex >= 0 && weekIndex < 13 {
 			if entry.Type == "inflow" {
 				weeks[weekIndex].inflow += entry.Amount

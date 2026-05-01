@@ -15,10 +15,10 @@ func setAuthCookie(c *gin.Context, token string, maxAge int) {
 		Value:    token,
 		MaxAge:   maxAge,
 		Path:     "/",
-		Domain:   "",           // empty = no domain restriction
+		Domain:   "", // empty = no domain restriction
 		Secure:   true,
 		HttpOnly: true,
-		SameSite: http.SameSiteNoneMode,  // required for cross-origin
+		SameSite: http.SameSiteNoneMode, // required for cross-origin
 	})
 }
 

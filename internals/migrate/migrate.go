@@ -15,5 +15,5 @@ func main() {
 
 	db.Connect()
 
-	db.DB.AutoMigrate(&models.User{}, &models.CashEntry{})
+	db.DB.AutoMigrate(&models.User{}, &models.Forecast{}, &models.CashEntry{})
 }

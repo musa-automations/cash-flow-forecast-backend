@@ -15,8 +15,27 @@ func GetEntries(c *gin.Context) {
 		return
 	}
 
+	forecastID := c.Query("forecast_id")
+	if forecastID == "" {
+		c.JSON(400, gin.H{"error": "forecast_id query parameter is required"})
+		return
+	}
+
+	parsedForecastID, err := uuid.Parse(forecastID)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Invalid forecast ID"})
+		return
+	}
+
+	// Verify the forecast belongs to the user
+	var forecast models.Forecast
+	if err := db.DB.Where("id = ? AND user_id = ?", parsedForecastID, parsedUserID).First(&forecast).Error; err != nil {
+		c.JSON(404, gin.H{"error": "Forecast not found"})
+		return
+	}
+
 	var entries []models.CashEntry
-	if err := db.DB.Where("user_id = ?", parsedUserID).Find(&entries).Error; err != nil {
+	if err := db.DB.Where("forecast_id = ? AND user_id = ?", parsedForecastID, parsedUserID).Find(&entries).Error; err != nil {
 		c.JSON(500, gin.H{"error": "Failed to retrieve entries"})
 		return
 	}
@@ -33,6 +52,7 @@ func CreateEntry(c *gin.Context) {
 	}
 
 	var input struct {
+		ForecastID  string  `json:"forecast_id" binding:"required"`
 		Type        string  `json:"type" binding:"required,oneof=inflow outflow"`
 		Amount      float64 `json:"amount" binding:"required"`
 		Category    string  `json:"category"`
@@ -45,8 +65,22 @@ func CreateEntry(c *gin.Context) {
 		return
 	}
 
+	parsedForecastID, err := uuid.Parse(input.ForecastID)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Invalid forecast ID"})
+		return
+	}
+
+	// Verify the forecast belongs to the user
+	var forecast models.Forecast
+	if err := db.DB.Where("id = ? AND user_id = ?", parsedForecastID, parsedUserID).First(&forecast).Error; err != nil {
+		c.JSON(404, gin.H{"error": "Forecast not found"})
+		return
+	}
+
 	entry := models.CashEntry{
 		UserID:      parsedUserID,
+		ForecastID:  parsedForecastID,
 		Type:        input.Type,
 		Amount:      input.Amount,
 		Category:    input.Category,
@@ -71,12 +105,15 @@ func CreateEntries(c *gin.Context) {
 		return
 	}
 
-	var input []struct {
-		Type        string  `json:"type" binding:"required,oneof=inflow outflow"`
-		Amount      float64 `json:"amount" binding:"required"`
-		Category    string  `json:"category"`
-		Description string  `json:"description"`
-		Date        string  `json:"date" binding:"required"`
+	var input struct {
+		ForecastID string `json:"forecast_id" binding:"required"`
+		Entries    []struct {
+			Type        string  `json:"type" binding:"required,oneof=inflow outflow"`
+			Amount      float64 `json:"amount" binding:"required"`
+			Category    string  `json:"category"`
+			Description string  `json:"description"`
+			Date        string  `json:"date" binding:"required"`
+		} `json:"entries" binding:"required"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -84,10 +121,24 @@ func CreateEntries(c *gin.Context) {
 		return
 	}
 
+	parsedForecastID, err := uuid.Parse(input.ForecastID)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Invalid forecast ID"})
+		return
+	}
+
+	// Verify the forecast belongs to the user
+	var forecast models.Forecast
+	if err := db.DB.Where("id = ? AND user_id = ?", parsedForecastID, parsedUserID).First(&forecast).Error; err != nil {
+		c.JSON(404, gin.H{"error": "Forecast not found"})
+		return
+	}
+
 	var entries []models.CashEntry
-	for _, item := range input {
+	for _, item := range input.Entries {
 		entry := models.CashEntry{
 			UserID:      parsedUserID,
+			ForecastID:  parsedForecastID,
 			Type:        item.Type,
 			Amount:      item.Amount,
 			Category:    item.Category,

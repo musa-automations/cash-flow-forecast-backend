@@ -1,18 +1,32 @@
 package controllers
 
 import (
+	"encoding/csv"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/waltertaya/cash-flow-forecast-backend/internals/db"
 	"github.com/waltertaya/cash-flow-forecast-backend/internals/models"
+	"github.com/xuri/excelize/v2"
 )
 
-// GetForecast generates a 13-week cash flow forecast
-func GetForecast(c *gin.Context) {
+type forecastImportRow struct {
+	Type        string
+	Amount      float64
+	Category    string
+	Description string
+	Date        string
+}
+
+// CreateForecast creates a new forecast with optional initial entries
+func CreateForecast(c *gin.Context) {
 	userID := c.GetString("user_id")
 	parsedUserID, err := uuid.Parse(userID)
 	if err != nil {
@@ -20,29 +34,309 @@ func GetForecast(c *gin.Context) {
 		return
 	}
 
-	// Get starting cash from query parameter
-	startingCashStr := c.DefaultQuery("startingCash", "0")
-	startingCash, err := strconv.ParseFloat(startingCashStr, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid starting cash value"})
+	var input struct {
+		Name         string  `json:"name" binding:"required"`
+		StartingCash float64 `json:"starting_cash" binding:"required"`
+		Entries      []struct {
+			Type        string  `json:"type" binding:"required,oneof=inflow outflow"`
+			Amount      float64 `json:"amount" binding:"required"`
+			Category    string  `json:"category"`
+			Description string  `json:"description"`
+			Date        string  `json:"date" binding:"required"`
+		} `json:"entries"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Fetch all cash entries for the user
+	// Create forecast
+	forecast := models.Forecast{
+		UserID:       parsedUserID,
+		Name:         input.Name,
+		StartingCash: input.StartingCash,
+	}
+
+	if err := db.DB.Create(&forecast).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create forecast"})
+		return
+	}
+
+	// Create entries if provided
+	if len(input.Entries) > 0 {
+		var entries []models.CashEntry
+		for _, item := range input.Entries {
+			entry := models.CashEntry{
+				UserID:      parsedUserID,
+				ForecastID:  forecast.ID,
+				Type:        item.Type,
+				Amount:      item.Amount,
+				Category:    item.Category,
+				Description: item.Description,
+				Date:        item.Date,
+			}
+			entries = append(entries, entry)
+		}
+
+		if err := db.DB.Create(&entries).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create entries"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusCreated, forecast)
+}
+
+// GetAllForecasts retrieves all forecasts for the authenticated user with generated forecast data
+func GetAllForecasts(c *gin.Context) {
+	userID := c.GetString("user_id")
+	parsedUserID, err := uuid.Parse(userID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	var forecasts []models.Forecast
+	if err := db.DB.Where("user_id = ?", parsedUserID).Find(&forecasts).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve forecasts"})
+		return
+	}
+
+	// Generate forecast data for each forecast
+	var forecastResponses []models.ForecastResponse
+	for _, forecast := range forecasts {
+		var entries []models.CashEntry
+		if err := db.DB.Where("forecast_id = ?", forecast.ID).Find(&entries).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve entries"})
+			return
+		}
+
+		weeks := generateForecastWeeks(forecast.StartingCash, entries)
+		forecastResponse := models.ForecastResponse{
+			ID:           forecast.ID,
+			UserID:       forecast.UserID,
+			Name:         forecast.Name,
+			StartingCash: forecast.StartingCash,
+			Weeks:        weeks,
+			CreatedAt:    forecast.CreatedAt,
+			UpdatedAt:    forecast.UpdatedAt,
+		}
+		forecastResponses = append(forecastResponses, forecastResponse)
+	}
+
+	c.JSON(http.StatusOK, forecastResponses)
+}
+
+// GetForecastByID retrieves a specific forecast with generated forecast data
+func GetForecastByID(c *gin.Context) {
+	userID := c.GetString("user_id")
+	parsedUserID, err := uuid.Parse(userID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	forecastID := c.Param("id")
+	parsedForecastID, err := uuid.Parse(forecastID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid forecast ID"})
+		return
+	}
+
+	var forecast models.Forecast
+	if err := db.DB.Where("id = ? AND user_id = ?", parsedForecastID, parsedUserID).First(&forecast).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Forecast not found"})
+		return
+	}
+
+	// Fetch entries for the forecast
 	var entries []models.CashEntry
-	if err := db.DB.Where("user_id = ?", parsedUserID).Find(&entries).Error; err != nil {
+	if err := db.DB.Where("forecast_id = ?", parsedForecastID).Find(&entries).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve entries"})
 		return
 	}
 
-	// Generate forecast
-	forecast := generateForecast(startingCash, entries)
+	// Generate forecast data
+	weeks := generateForecastWeeks(forecast.StartingCash, entries)
+	forecastResponse := models.ForecastResponse{
+		ID:           forecast.ID,
+		UserID:       forecast.UserID,
+		Name:         forecast.Name,
+		StartingCash: forecast.StartingCash,
+		Weeks:        weeks,
+		CreatedAt:    forecast.CreatedAt,
+		UpdatedAt:    forecast.UpdatedAt,
+	}
+
+	c.JSON(http.StatusOK, forecastResponse)
+}
+
+// UpdateForecast updates a forecast's name and/or starting cash
+func UpdateForecast(c *gin.Context) {
+	userID := c.GetString("user_id")
+	parsedUserID, err := uuid.Parse(userID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	forecastID := c.Param("id")
+	parsedForecastID, err := uuid.Parse(forecastID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid forecast ID"})
+		return
+	}
+
+	var input struct {
+		Name         string   `json:"name"`
+		StartingCash *float64 `json:"starting_cash"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var forecast models.Forecast
+	if err := db.DB.Where("id = ? AND user_id = ?", parsedForecastID, parsedUserID).First(&forecast).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Forecast not found"})
+		return
+	}
+
+	if input.Name != "" {
+		forecast.Name = input.Name
+	}
+	if input.StartingCash != nil {
+		forecast.StartingCash = *input.StartingCash
+	}
+
+	if err := db.DB.Save(&forecast).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update forecast"})
+		return
+	}
 
 	c.JSON(http.StatusOK, forecast)
 }
 
-// generateForecast creates a 13-week forecast based on starting cash and entries
-func generateForecast(startingCash float64, entries []models.CashEntry) models.Forecast {
+// DeleteForecast deletes a forecast and all its associated entries
+func DeleteForecast(c *gin.Context) {
+	userID := c.GetString("user_id")
+	parsedUserID, err := uuid.Parse(userID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	forecastID := c.Param("id")
+	parsedForecastID, err := uuid.Parse(forecastID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid forecast ID"})
+		return
+	}
+
+	var forecast models.Forecast
+	if err := db.DB.Where("id = ? AND user_id = ?", parsedForecastID, parsedUserID).First(&forecast).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Forecast not found"})
+		return
+	}
+
+	// Delete all entries for this forecast
+	if err := db.DB.Where("forecast_id = ?", parsedForecastID).Delete(&models.CashEntry{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete entries"})
+		return
+	}
+
+	// Delete the forecast
+	if err := db.DB.Delete(&forecast).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete forecast"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Forecast deleted successfully"})
+}
+
+// ImportForecastEntries uploads CSV or Excel rows into an existing forecast.
+func ImportForecastEntries(c *gin.Context) {
+	userID := c.GetString("user_id")
+	parsedUserID, err := uuid.Parse(userID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	forecastID := c.Param("id")
+	parsedForecastID, err := uuid.Parse(forecastID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid forecast ID"})
+		return
+	}
+
+	var forecast models.Forecast
+	if err := db.DB.Where("id = ? AND user_id = ?", parsedForecastID, parsedUserID).First(&forecast).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Forecast not found"})
+		return
+	}
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
+		return
+	}
+
+	ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
+	if ext != ".csv" && ext != ".xlsx" && ext != ".xlsm" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only csv and excel files are supported"})
+		return
+	}
+
+	tempFile, err := os.CreateTemp("", "forecast-import-*"+ext)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to prepare upload"})
+		return
+	}
+	defer os.Remove(tempFile.Name())
+	defer tempFile.Close()
+
+	if err := c.SaveUploadedFile(fileHeader, tempFile.Name()); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save uploaded file"})
+		return
+	}
+
+	rows, err := readForecastImportRows(tempFile.Name(), ext)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	entries := make([]models.CashEntry, 0, len(rows))
+	for _, row := range rows {
+		entries = append(entries, models.CashEntry{
+			UserID:      parsedUserID,
+			ForecastID:  parsedForecastID,
+			Type:        row.Type,
+			Amount:      row.Amount,
+			Category:    row.Category,
+			Description: row.Description,
+			Date:        row.Date,
+		})
+	}
+
+	if err := db.DB.Create(&entries).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to import entries"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"message":        "entries imported successfully",
+		"forecast_id":    parsedForecastID,
+		"imported_count": len(entries),
+		"entries":        entries,
+	})
+}
+
+// generateForecastWeeks generates 13 forecast weeks based on starting cash and entries
+func generateForecastWeeks(startingCash float64, entries []models.CashEntry) []models.ForecastWeek {
 	// Initialize 13 weeks with zero inflow/outflow
 	weeks := make([]struct {
 		inflow  float64
@@ -98,10 +392,7 @@ func generateForecast(startingCash float64, entries []models.CashEntry) models.F
 		opening = closing
 	}
 
-	return models.Forecast{
-		StartingCash: startingCash,
-		Weeks:        forecastWeeks,
-	}
+	return forecastWeeks
 }
 
 // getWeekIndex returns the week index (0-12) for a given date
@@ -137,4 +428,179 @@ func getWeekStart(t time.Time) time.Time {
 	weekStart := t.AddDate(0, 0, -daysToSubtract)
 	// Set to start of day (00:00:00)
 	return time.Date(weekStart.Year(), weekStart.Month(), weekStart.Day(), 0, 0, 0, 0, weekStart.Location())
+}
+
+func readForecastImportRows(path string, ext string) ([]forecastImportRow, error) {
+	var rows [][]string
+	var err error
+
+	switch ext {
+	case ".csv":
+		rows, err = readCSVRows(path)
+	case ".xlsx", ".xlsm":
+		rows, err = readExcelRows(path)
+	default:
+		return nil, fmt.Errorf("unsupported file type")
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return parseForecastImportRows(rows)
+}
+
+func readCSVRows(path string) ([][]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	reader := csv.NewReader(file)
+	reader.FieldsPerRecord = -1
+	return reader.ReadAll()
+}
+
+func readExcelRows(path string) ([][]string, error) {
+	workbook, err := excelize.OpenFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer workbook.Close()
+
+	sheetNames := workbook.GetSheetList()
+	if len(sheetNames) == 0 {
+		return nil, fmt.Errorf("excel file does not contain any sheets")
+	}
+
+	return workbook.GetRows(sheetNames[0])
+}
+
+func parseForecastImportRows(rows [][]string) ([]forecastImportRow, error) {
+	if len(rows) < 2 {
+		return nil, fmt.Errorf("file must contain a header row and at least one data row")
+	}
+
+	headerIndex := make(map[string]int)
+	for index, header := range rows[0] {
+		normalizedHeader := normalizeImportHeader(header)
+		if normalizedHeader != "" {
+			headerIndex[normalizedHeader] = index
+		}
+	}
+
+	for _, required := range []string{"type", "amount", "date"} {
+		if _, ok := headerIndex[required]; !ok {
+			return nil, fmt.Errorf("missing required column: %s", required)
+		}
+	}
+
+	var entries []forecastImportRow
+	for rowIndex, row := range rows[1:] {
+		if isEmptyImportRow(row) {
+			continue
+		}
+
+		typeValue := strings.ToLower(strings.TrimSpace(getImportCell(row, headerIndex, "type")))
+		if typeValue != "inflow" && typeValue != "outflow" {
+			return nil, fmt.Errorf("row %d: type must be inflow or outflow", rowIndex+2)
+		}
+
+		amountRaw := strings.ReplaceAll(strings.TrimSpace(getImportCell(row, headerIndex, "amount")), ",", "")
+		amount, err := strconv.ParseFloat(amountRaw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("row %d: invalid amount", rowIndex+2)
+		}
+
+		dateValue, err := normalizeImportDate(getImportCell(row, headerIndex, "date"))
+		if err != nil {
+			return nil, fmt.Errorf("row %d: %w", rowIndex+2, err)
+		}
+
+		entries = append(entries, forecastImportRow{
+			Type:        typeValue,
+			Amount:      amount,
+			Category:    getImportCell(row, headerIndex, "category"),
+			Description: getImportCell(row, headerIndex, "description"),
+			Date:        dateValue,
+		})
+	}
+
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("file does not contain any valid entries")
+	}
+
+	return entries, nil
+}
+
+func getImportCell(row []string, headerIndex map[string]int, column string) string {
+	index, ok := headerIndex[column]
+	if !ok || index >= len(row) {
+		return ""
+	}
+
+	return strings.TrimSpace(row[index])
+}
+
+func normalizeImportHeader(header string) string {
+	switch strings.ToLower(strings.TrimSpace(header)) {
+	case "type", "entry type":
+		return "type"
+	case "amount", "value":
+		return "amount"
+	case "date", "entry date":
+		return "date"
+	case "category":
+		return "category"
+	case "description", "notes":
+		return "description"
+	default:
+		return ""
+	}
+}
+
+func normalizeImportDate(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("date is required")
+	}
+
+	layouts := []string{
+		"2006-01-02",
+		"2006/01/02",
+		"02/01/2006",
+		"01/02/2006",
+		"2/1/2006",
+		"1/2/2006",
+		"02-Jan-2006",
+		"02 Jan 2006",
+		"Jan 2, 2006",
+	}
+
+	for _, layout := range layouts {
+		if parsed, err := time.ParseInLocation(layout, raw, time.Local); err == nil {
+			return parsed.Format("2006-01-02"), nil
+		}
+	}
+
+	if serial, err := strconv.ParseFloat(raw, 64); err == nil {
+		excelEpoch := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
+		days := int(serial)
+		fraction := serial - float64(days)
+		parsed := excelEpoch.AddDate(0, 0, days).Add(time.Duration(fraction * float64(24*time.Hour)))
+		return parsed.Format("2006-01-02"), nil
+	}
+
+	return "", fmt.Errorf("invalid date format")
+}
+
+func isEmptyImportRow(row []string) bool {
+	for _, value := range row {
+		if strings.TrimSpace(value) != "" {
+			return false
+		}
+	}
+
+	return true
 }

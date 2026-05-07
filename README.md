@@ -6,7 +6,9 @@ A robust and scalable REST API built with Go and Gin for managing personal cash 
 
 - **User Authentication** — Secure signup, login, and JWT-based session management
 - **Cash Entry Management** — Create, read, update, and delete cash entries (inflows/outflows)
+- **Forecast Management** — Create multiple forecasts per user and manage their entries independently
 - **Bulk Operations** — Import multiple cash entries at once
+- **CSV/XLSX Import** — Upload spreadsheet files into a specific forecast
 - **UUID-based IDs** — Secure, collision-resistant identifiers
 - **Neon PostgreSQL** — Persistent cloud database storage
 - **CORS Support** — Cross-origin request handling
@@ -20,6 +22,7 @@ A robust and scalable REST API built with Go and Gin for managing personal cash 
 - **Database:** PostgreSQL (Neon) with GORM ORM
 - **Authentication:** JWT (github.com/golang-jwt/jwt)
 - **ID Generation:** UUID (github.com/google/uuid)
+- **Spreadsheet Import:** Excelize (github.com/xuri/excelize/v2)
 - **Environment:** godotenv
 
 ## Prerequisites
@@ -166,14 +169,40 @@ http://localhost:8080/api/v1
   }
   ```
 
-### Cash Entry Routes
+### Forecast Routes
 
-All entry routes require authentication (JWT token in `auth_token` cookie).
+All forecast routes require authentication (JWT token in `auth_token` cookie).
 
-#### Get All Entries
+#### Create Forecast
 
-- **Endpoint:** `GET /entries`
-- **Description:** Retrieve all cash entries for the authenticated user
+- **Endpoint:** `POST /forecasts`
+- **Description:** Create a new forecast for the authenticated user
+- **Auth:** Required
+- **Request Body:**
+  ```json
+  {
+    "name": "Q2 2026 Forecast",
+    "starting_cash": 1000,
+    "entries": [
+      {
+        "type": "inflow",
+        "amount": 1500,
+        "category": "salary",
+        "description": "Monthly salary",
+        "date": "2026-05-15"
+      }
+    ]
+  }
+  ```
+- **Response:** `201 Created`
+- **Notes:**
+  - `entries` is optional
+  - Any entries included here are automatically linked to the new forecast
+
+#### List Forecasts
+
+- **Endpoint:** `GET /forecasts`
+- **Description:** Return all forecasts for the authenticated user, each with generated 13-week data
 - **Auth:** Required
 - **Response:** `200 OK`
   ```json
@@ -181,6 +210,127 @@ All entry routes require authentication (JWT token in `auth_token` cookie).
     {
       "id": "550e8400-e29b-41d4-a716-446655440000",
       "user_id": "660e8400-e29b-41d4-a716-446655440000",
+      "name": "Q2 2026 Forecast",
+      "starting_cash": 1000,
+      "weeks": [
+        {
+          "week": 1,
+          "opening": 1000,
+          "inflow": 1500,
+          "outflow": 500,
+          "closing": 2000,
+          "warning": false
+        }
+      ],
+      "created_at": 1704067200,
+      "updated_at": 1704067200
+    }
+  ]
+  ```
+
+#### View Forecast
+
+- **Endpoint:** `GET /forecasts/:id`
+- **Description:** Return one forecast with its generated 13-week data
+- **Auth:** Required
+- **URL Parameters:**
+  - `id`: UUID of the forecast
+- **Response:** `200 OK`
+  ```json
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "user_id": "660e8400-e29b-41d4-a716-446655440000",
+    "name": "Q2 2026 Forecast",
+    "starting_cash": 1000,
+    "weeks": [
+      {
+        "week": 1,
+        "opening": 1000,
+        "inflow": 1500,
+        "outflow": 500,
+        "closing": 2000,
+        "warning": false
+      }
+    ],
+    "created_at": 1704067200,
+    "updated_at": 1704067200
+  }
+  ```
+
+#### Update Forecast
+
+- **Endpoint:** `PUT /forecasts/:id`
+- **Description:** Update forecast name and/or starting cash
+- **Auth:** Required
+- **URL Parameters:**
+  - `id`: UUID of the forecast
+- **Request Body:**
+  ```json
+  {
+    "name": "Updated Forecast Name",
+    "starting_cash": 2500
+  }
+  ```
+- **Response:** `200 OK`
+
+#### Delete Forecast
+
+- **Endpoint:** `DELETE /forecasts/:id`
+- **Description:** Delete a forecast and all entries attached to it
+- **Auth:** Required
+- **URL Parameters:**
+  - `id`: UUID of the forecast
+- **Response:** `200 OK`
+  ```json
+  {
+    "message": "Forecast deleted successfully"
+  }
+  ```
+
+#### Import Forecast Entries from CSV/XLSX
+
+- **Endpoint:** `POST /forecasts/:id/import`
+- **Description:** Upload a CSV or Excel file and create entries under a specific forecast
+- **Auth:** Required
+- **Content Type:** `multipart/form-data`
+- **Form Fields:**
+  - `file`: CSV, XLSX, or XLSM file
+- **Required Columns:** `type`, `amount`, `date`
+- **Optional Columns:** `category`, `description`
+- **Accepted Date Formats:**
+  - `YYYY-MM-DD`
+  - `YYYY/MM/DD`
+  - `DD/MM/YYYY`
+  - `MM/DD/YYYY`
+  - Common long-date formats and Excel serial dates
+- **Response:** `201 Created`
+  ```json
+  {
+    "message": "entries imported successfully",
+    "forecast_id": "550e8400-e29b-41d4-a716-446655440000",
+    "imported_count": 5,
+    "entries": []
+  }
+  ```
+
+### Cash Entry Routes
+
+All entry routes require authentication (JWT token in `auth_token` cookie).
+
+#### Get All Entries
+
+- **Endpoint:** `GET /entries`
+- **Description:** Retrieve all cash entries for a specific forecast owned by the authenticated user
+- **Auth:** Required
+- **Query Parameters:**
+  - `forecast_id`: UUID of the forecast
+- **Response:** `200 OK`
+  ```json
+  [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "user_id": "660e8400-e29b-41d4-a716-446655440000",
+      "forecast_id": "770e8400-e29b-41d4-a716-446655440000",
       "type": "inflow",
       "amount": 1500.00,
       "category": "salary",
@@ -194,11 +344,12 @@ All entry routes require authentication (JWT token in `auth_token` cookie).
 #### Create Cash Entry
 
 - **Endpoint:** `POST /entries`
-- **Description:** Add a single cash entry
+- **Description:** Add a single cash entry to a specific forecast
 - **Auth:** Required
 - **Request Body:**
   ```json
   {
+    "forecast_id": "770e8400-e29b-41d4-a716-446655440000",
     "type": "inflow",
     "amount": 1500.00,
     "category": "salary",
@@ -208,6 +359,7 @@ All entry routes require authentication (JWT token in `auth_token` cookie).
   ```
 - **Response:** `201 Created`
 - **Validation:**
+  - forecast_id: required, UUID of an existing forecast owned by the user
   - type: required, must be "inflow" or "outflow"
   - amount: required, numeric
   - category: optional
@@ -217,26 +369,29 @@ All entry routes require authentication (JWT token in `auth_token` cookie).
 #### Create Multiple Entries
 
 - **Endpoint:** `POST /entries/bulk`
-- **Description:** Import multiple cash entries at once
+- **Description:** Import multiple cash entries into a specific forecast
 - **Auth:** Required
 - **Request Body:**
   ```json
-  [
-    {
-      "type": "inflow",
-      "amount": 1500.00,
-      "category": "salary",
-      "description": "Monthly salary",
-      "date": "2024-05-01"
-    },
-    {
-      "type": "outflow",
-      "amount": 200.00,
-      "category": "utilities",
-      "description": "Electric bill",
-      "date": "2024-05-02"
-    }
-  ]
+  {
+    "forecast_id": "770e8400-e29b-41d4-a716-446655440000",
+    "entries": [
+      {
+        "type": "inflow",
+        "amount": 1500.00,
+        "category": "salary",
+        "description": "Monthly salary",
+        "date": "2024-05-01"
+      },
+      {
+        "type": "outflow",
+        "amount": 200.00,
+        "category": "utilities",
+        "description": "Electric bill",
+        "date": "2024-05-02"
+      }
+    ]
+  }
   ```
 - **Response:** `201 Created` (array of created entries)
 
@@ -263,52 +418,6 @@ All entry routes require authentication (JWT token in `auth_token` cookie).
     "message": "Entry deleted successfully"
   }
   ```
-
-#### Get 13-Week Forecast
-
-- **Endpoint:** `GET /entries/forecast?startingCash=1000`
-- **Description:** Generate a 13-week cash flow forecast based on historical entries and starting balance
-- **Auth:** Required
-- **Query Parameters:**
-  - `startingCash`: Initial cash balance (required, numeric, defaults to 0)
-- **Response:** `200 OK`
-  ```json
-  {
-    "starting_cash": 1000.00,
-    "weeks": [
-      {
-        "week": 1,
-        "opening": 1000.00,
-        "inflow": 1500.00,
-        "outflow": 500.00,
-        "closing": 2000.00,
-        "warning": false
-      },
-      {
-        "week": 2,
-        "opening": 2000.00,
-        "inflow": 0.00,
-        "outflow": 1200.00,
-        "closing": 800.00,
-        "warning": false
-      },
-      {
-        "week": 3,
-        "opening": 800.00,
-        "inflow": 0.00,
-        "outflow": 1500.00,
-        "closing": -700.00,
-        "warning": true
-      }
-    ]
-  }
-  ```
-- **Description:**
-  - Groups all user entries by week relative to today
-  - Week 1 = current week, Week 2 = next week, up to Week 13
-  - Calculates running balance with opening and closing for each week
-  - `warning` flag indicates weeks with negative closing balance
-  - Past dates are grouped into their respective historical weeks
 
 ## Project Structure
 

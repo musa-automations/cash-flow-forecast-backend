@@ -17,11 +17,21 @@ func SetupRoutes(r *gin.Engine) {
 			auth.GET("/me", middlewares.AuthMiddleware(), controllers.Me)
 		}
 
+		forecasts := v1.Group("/forecasts")
+		forecasts.Use(middlewares.AuthMiddleware())
+		{
+			forecasts.POST("", controllers.CreateForecast)
+			forecasts.POST("/:id/import", controllers.ImportForecastEntries)
+			forecasts.GET("", controllers.GetAllForecasts)
+			forecasts.GET("/:id", controllers.GetForecastByID)
+			forecasts.PUT("/:id", controllers.UpdateForecast)
+			forecasts.DELETE("/:id", controllers.DeleteForecast)
+		}
+
 		entries := v1.Group("/entries")
 		entries.Use(middlewares.AuthMiddleware())
 		{
 			entries.GET("", controllers.GetEntries)
-			entries.GET("/forecast", controllers.GetForecast)
 			entries.POST("", controllers.CreateEntry)
 			entries.POST("/bulk", controllers.CreateEntries)
 			entries.PUT("/:id", controllers.UpdateEntry)

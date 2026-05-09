@@ -81,7 +81,13 @@ func CreateForecast(c *gin.Context) {
 	// Create entries if provided
 	if len(input.Entries) > 0 {
 		var entries []models.CashEntry
-		for _, item := range input.Entries {
+		for index, item := range input.Entries {
+			normalizedDate, err := normalizeImportDate(item.Date)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("entries[%d].date has invalid format. Use YYYY-MM-DD", index)})
+				return
+			}
+
 			entry := models.CashEntry{
 				UserID:      parsedUserID,
 				ForecastID:  forecast.ID,
@@ -89,7 +95,7 @@ func CreateForecast(c *gin.Context) {
 				Amount:      item.Amount,
 				Category:    item.Category,
 				Description: item.Description,
-				Date:        item.Date,
+				Date:        normalizedDate,
 			}
 			entries = append(entries, entry)
 		}
@@ -380,11 +386,9 @@ func generateForecastWeeks(startingCash float64, startingDate *string, entries [
 	anchorDate = time.Date(anchorDate.Year(), anchorDate.Month(), anchorDate.Day(), 0, 0, 0, 0, anchorDate.Location())
 
 	// Group entries by week from the optional starting date (or today when omitted)
-	now := time.Now()
-	_ = now
 
 	for _, entry := range entries {
-		entryDate, err := time.ParseInLocation(forecastDateLayout, entry.Date, anchorDate.Location())
+		entryDate, err := parseProjectionDate(entry.Date, anchorDate.Location())
 		if err != nil {
 			// skip invalid dates
 			continue
@@ -445,6 +449,35 @@ func parseOptionalForecastDate(raw *string) (*string, error) {
 
 	normalized := parsedDate.Format(forecastDateLayout)
 	return &normalized, nil
+}
+
+func parseProjectionDate(raw string, location *time.Location) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, fmt.Errorf("date is required")
+	}
+
+	layouts := []string{
+		forecastDateLayout,
+		time.RFC3339,
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+	}
+
+	for _, layout := range layouts {
+		if parsed, err := time.ParseInLocation(layout, raw, location); err == nil {
+			return time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, parsed.Location()), nil
+		}
+	}
+
+	if len(raw) >= len(forecastDateLayout) {
+		if parsed, err := time.ParseInLocation(forecastDateLayout, raw[:len(forecastDateLayout)], location); err == nil {
+			return time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, parsed.Location()), nil
+		}
+	}
+
+	return time.Time{}, fmt.Errorf("invalid projection date format")
 }
 
 // getWeekIndex returns the week index (0-12) for a given date

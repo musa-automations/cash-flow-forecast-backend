@@ -1,6 +1,8 @@
 package controllers
 
 import (
+	"fmt"
+
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/waltertaya/cash-flow-forecast-backend/internals/db"
@@ -65,6 +67,12 @@ func CreateEntry(c *gin.Context) {
 		return
 	}
 
+	normalizedDate, err := normalizeImportDate(input.Date)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Invalid date format. Use YYYY-MM-DD"})
+		return
+	}
+
 	parsedForecastID, err := uuid.Parse(input.ForecastID)
 	if err != nil {
 		c.JSON(400, gin.H{"error": "Invalid forecast ID"})
@@ -85,7 +93,7 @@ func CreateEntry(c *gin.Context) {
 		Amount:      input.Amount,
 		Category:    input.Category,
 		Description: input.Description,
-		Date:        input.Date,
+		Date:        normalizedDate,
 	}
 
 	if err := db.DB.Create(&entry).Error; err != nil {
@@ -135,7 +143,13 @@ func CreateEntries(c *gin.Context) {
 	}
 
 	var entries []models.CashEntry
-	for _, item := range input.Entries {
+	for index, item := range input.Entries {
+		normalizedDate, err := normalizeImportDate(item.Date)
+		if err != nil {
+			c.JSON(400, gin.H{"error": fmt.Sprintf("Entry %d has invalid date format. Use YYYY-MM-DD", index+1)})
+			return
+		}
+
 		entry := models.CashEntry{
 			UserID:      parsedUserID,
 			ForecastID:  parsedForecastID,
@@ -143,7 +157,7 @@ func CreateEntries(c *gin.Context) {
 			Amount:      item.Amount,
 			Category:    item.Category,
 			Description: item.Description,
-			Date:        item.Date,
+			Date:        normalizedDate,
 		}
 		entries = append(entries, entry)
 	}
@@ -186,6 +200,12 @@ func UpdateEntry(c *gin.Context) {
 		return
 	}
 
+	normalizedDate, err := normalizeImportDate(input.Date)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Invalid date format. Use YYYY-MM-DD"})
+		return
+	}
+
 	var entry models.CashEntry
 	if err := db.DB.Where("id = ? AND user_id = ?", parsedEntryID, parsedUserID).First(&entry).Error; err != nil {
 		c.JSON(404, gin.H{"error": "Entry not found"})
@@ -196,7 +216,7 @@ func UpdateEntry(c *gin.Context) {
 	entry.Amount = input.Amount
 	entry.Category = input.Category
 	entry.Description = input.Description
-	entry.Date = input.Date
+	entry.Date = normalizedDate
 
 	if err := db.DB.Save(&entry).Error; err != nil {
 		c.JSON(500, gin.H{"error": "Failed to update entry"})

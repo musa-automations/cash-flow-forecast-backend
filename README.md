@@ -182,6 +182,7 @@ All forecast routes require authentication (JWT token in `auth_token` cookie).
   ```json
   {
     "name": "Q2 2026 Forecast",
+    "starting_date": "2026-05-01",
     "starting_cash": 1000,
     "entries": [
       {
@@ -197,7 +198,42 @@ All forecast routes require authentication (JWT token in `auth_token` cookie).
 - **Response:** `201 Created`
 - **Notes:**
   - `entries` is optional
+  - `starting_date` is optional and must use `YYYY-MM-DD`
+  - `starting_cash` is optional; if omitted it defaults to `0`
+  - `starting_cash` can be explicitly set to `0`
   - Any entries included here are automatically linked to the new forecast
+  - Entries dated before `starting_date` are excluded from the generated projection
+
+#### Forecast Response Contract
+
+The forecast endpoints return the following response shape:
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "user_id": "660e8400-e29b-41d4-a716-446655440000",
+  "name": "Q2 2026 Forecast",
+  "starting_date": "2026-05-01",
+  "starting_cash": 1000,
+  "weeks": [
+    {
+      "week": 1,
+      "opening": 1000,
+      "inflow": 1500,
+      "outflow": 500,
+      "closing": 2000,
+      "end_date": "2026-05-07",
+      "warning": false
+    }
+  ],
+  "created_at": 1704067200,
+  "updated_at": 1704067200
+}
+```
+
+- `starting_date` is optional and will be `null` when not provided
+- `weeks[].end_date` is always present and uses `YYYY-MM-DD`
+- Each week represents a 7-day range starting from `starting_date` when provided, otherwise from the current day
 
 #### List Forecasts
 
@@ -211,6 +247,7 @@ All forecast routes require authentication (JWT token in `auth_token` cookie).
       "id": "550e8400-e29b-41d4-a716-446655440000",
       "user_id": "660e8400-e29b-41d4-a716-446655440000",
       "name": "Q2 2026 Forecast",
+      "starting_date": "2026-05-01",
       "starting_cash": 1000,
       "weeks": [
         {
@@ -219,6 +256,7 @@ All forecast routes require authentication (JWT token in `auth_token` cookie).
           "inflow": 1500,
           "outflow": 500,
           "closing": 2000,
+          "end_date": "2026-05-07",
           "warning": false
         }
       ],
@@ -241,6 +279,7 @@ All forecast routes require authentication (JWT token in `auth_token` cookie).
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "user_id": "660e8400-e29b-41d4-a716-446655440000",
     "name": "Q2 2026 Forecast",
+    "starting_date": "2026-05-01",
     "starting_cash": 1000,
     "weeks": [
       {
@@ -249,6 +288,7 @@ All forecast routes require authentication (JWT token in `auth_token` cookie).
         "inflow": 1500,
         "outflow": 500,
         "closing": 2000,
+        "end_date": "2026-05-07",
         "warning": false
       }
     ],
@@ -260,7 +300,7 @@ All forecast routes require authentication (JWT token in `auth_token` cookie).
 #### Update Forecast
 
 - **Endpoint:** `PUT /forecasts/:id`
-- **Description:** Update forecast name and/or starting cash
+- **Description:** Update forecast name, starting date, and/or starting cash
 - **Auth:** Required
 - **URL Parameters:**
   - `id`: UUID of the forecast
@@ -268,10 +308,15 @@ All forecast routes require authentication (JWT token in `auth_token` cookie).
   ```json
   {
     "name": "Updated Forecast Name",
+    "starting_date": "2026-05-01",
     "starting_cash": 2500
   }
   ```
 - **Response:** `200 OK`
+- **Notes:**
+  - `starting_date` is optional and must use `YYYY-MM-DD`
+  - `starting_cash` is optional and supports `0`
+  - When `starting_date` is changed, the forecast projection recalculates from that new start date
 
 #### Delete Forecast
 

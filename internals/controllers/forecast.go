@@ -17,6 +17,8 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+const forecastDateLayout = "2006-01-02"
+
 type forecastImportRow struct {
 	Type        string
 	Amount      float64
@@ -35,8 +37,9 @@ func CreateForecast(c *gin.Context) {
 	}
 
 	var input struct {
-		Name         string  `json:"name" binding:"required"`
-		StartingCash float64 `json:"starting_cash" binding:"required"`
+		Name         string   `json:"name" binding:"required"`
+		StartingDate *string  `json:"starting_date"`
+		StartingCash *float64 `json:"starting_cash"`
 		Entries      []struct {
 			Type        string  `json:"type" binding:"required,oneof=inflow outflow"`
 			Amount      float64 `json:"amount" binding:"required"`
@@ -51,11 +54,23 @@ func CreateForecast(c *gin.Context) {
 		return
 	}
 
+	startingDate, err := parseOptionalForecastDate(input.StartingDate)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	startingCash := 0.0
+	if input.StartingCash != nil {
+		startingCash = *input.StartingCash
+	}
+
 	// Create forecast
 	forecast := models.Forecast{
 		UserID:       parsedUserID,
 		Name:         input.Name,
-		StartingCash: input.StartingCash,
+		StartingDate: startingDate,
+		StartingCash: startingCash,
 	}
 
 	if err := db.DB.Create(&forecast).Error; err != nil {
@@ -112,11 +127,12 @@ func GetAllForecasts(c *gin.Context) {
 			return
 		}
 
-		weeks := generateForecastWeeks(forecast.StartingCash, entries)
+		weeks := generateForecastWeeks(forecast.StartingCash, forecast.StartingDate, entries)
 		forecastResponse := models.ForecastResponse{
 			ID:           forecast.ID,
 			UserID:       forecast.UserID,
 			Name:         forecast.Name,
+			StartingDate: forecast.StartingDate,
 			StartingCash: forecast.StartingCash,
 			Weeks:        weeks,
 			CreatedAt:    forecast.CreatedAt,
@@ -158,11 +174,12 @@ func GetForecastByID(c *gin.Context) {
 	}
 
 	// Generate forecast data
-	weeks := generateForecastWeeks(forecast.StartingCash, entries)
+	weeks := generateForecastWeeks(forecast.StartingCash, forecast.StartingDate, entries)
 	forecastResponse := models.ForecastResponse{
 		ID:           forecast.ID,
 		UserID:       forecast.UserID,
 		Name:         forecast.Name,
+		StartingDate: forecast.StartingDate,
 		StartingCash: forecast.StartingCash,
 		Weeks:        weeks,
 		CreatedAt:    forecast.CreatedAt,
@@ -190,10 +207,17 @@ func UpdateForecast(c *gin.Context) {
 
 	var input struct {
 		Name         string   `json:"name"`
+		StartingDate *string  `json:"starting_date"`
 		StartingCash *float64 `json:"starting_cash"`
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	startingDate, err := parseOptionalForecastDate(input.StartingDate)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -206,6 +230,9 @@ func UpdateForecast(c *gin.Context) {
 
 	if input.Name != "" {
 		forecast.Name = input.Name
+	}
+	if input.StartingDate != nil {
+		forecast.StartingDate = startingDate
 	}
 	if input.StartingCash != nil {
 		forecast.StartingCash = *input.StartingCash
@@ -336,33 +363,40 @@ func ImportForecastEntries(c *gin.Context) {
 }
 
 // generateForecastWeeks generates 13 forecast weeks based on starting cash and entries
-func generateForecastWeeks(startingCash float64, entries []models.CashEntry) []models.ForecastWeek {
+func generateForecastWeeks(startingCash float64, startingDate *string, entries []models.CashEntry) []models.ForecastWeek {
 	// Initialize 13 weeks with zero inflow/outflow
 	weeks := make([]struct {
 		inflow  float64
 		outflow float64
 	}, 13)
 
-	// Group entries by week (only future-dated entries: entry.date >= today)
+	anchorDate := time.Now()
+	if startingDate != nil {
+		parsedAnchorDate, err := time.ParseInLocation(forecastDateLayout, *startingDate, time.Local)
+		if err == nil {
+			anchorDate = parsedAnchorDate
+		}
+	}
+	anchorDate = time.Date(anchorDate.Year(), anchorDate.Month(), anchorDate.Day(), 0, 0, 0, 0, anchorDate.Location())
+
+	// Group entries by week from the optional starting date (or today when omitted)
 	now := time.Now()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	currentWeekStart := getWeekStart(now)
+	_ = now
 
 	for _, entry := range entries {
-		entryDate, err := time.ParseInLocation("2006-01-02", entry.Date, now.Location())
+		entryDate, err := time.ParseInLocation(forecastDateLayout, entry.Date, anchorDate.Location())
 		if err != nil {
 			// skip invalid dates
 			continue
 		}
 
-		// only include entries dated today or in the future
-		if entryDate.Before(today) {
+		// only include entries dated on or after the forecast starting date
+		if entryDate.Before(anchorDate) {
 			continue
 		}
 
-		entryWeekStart := getWeekStart(entryDate)
-		daysDiff := entryWeekStart.Sub(currentWeekStart).Hours() / 24
-		weekIndex := int(daysDiff / 7)
+		daysDiff := int(entryDate.Sub(anchorDate).Hours() / 24)
+		weekIndex := daysDiff / 7
 
 		if weekIndex >= 0 && weekIndex < 13 {
 			if entry.Type == "inflow" {
@@ -374,10 +408,13 @@ func generateForecastWeeks(startingCash float64, entries []models.CashEntry) []m
 	}
 
 	// Generate forecast weeks
+
 	forecastWeeks := make([]models.ForecastWeek, 13)
 	opening := startingCash
 
 	for i := 0; i < 13; i++ {
+		weekStart := anchorDate.AddDate(0, 0, i*7)
+		weekEnd := weekStart.AddDate(0, 0, 6)
 		closing := opening + weeks[i].inflow - weeks[i].outflow
 
 		forecastWeeks[i] = models.ForecastWeek{
@@ -386,6 +423,7 @@ func generateForecastWeeks(startingCash float64, entries []models.CashEntry) []m
 			Inflow:  weeks[i].inflow,
 			Outflow: weeks[i].outflow,
 			Closing: closing,
+			EndDate: weekEnd.Format(forecastDateLayout),
 			Warning: closing < 0,
 		}
 
@@ -393,6 +431,20 @@ func generateForecastWeeks(startingCash float64, entries []models.CashEntry) []m
 	}
 
 	return forecastWeeks
+}
+
+func parseOptionalForecastDate(raw *string) (*string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+
+	parsedDate, err := time.ParseInLocation(forecastDateLayout, *raw, time.Local)
+	if err != nil {
+		return nil, fmt.Errorf("starting_date must use YYYY-MM-DD format")
+	}
+
+	normalized := parsedDate.Format(forecastDateLayout)
+	return &normalized, nil
 }
 
 // getWeekIndex returns the week index (0-12) for a given date
